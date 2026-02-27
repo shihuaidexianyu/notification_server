@@ -3,7 +3,7 @@ use std::{env, str::FromStr, sync::Arc};
 use anyhow::{Context, Result};
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -19,11 +19,13 @@ use tracing::{error, info};
 struct AppState {
     mailer: AsyncSmtpTransport<Tokio1Executor>,
     from: Mailbox,
+    api_key: String,
 }
 
 #[derive(Debug)]
 struct Config {
     http_bind: String,
+    api_key: String,
     smtp_host: String,
     smtp_port: u16,
     smtp_username: String,
@@ -33,10 +35,18 @@ struct Config {
 }
 
 #[derive(Debug, Deserialize)]
-struct SendEmailRequest {
+struct NotifyRequest {
+    service: NotificationService,
     title: String,
     to: String,
     body: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NotificationService {
+    #[serde(alias = "stmp")]
+    Smtp,
 }
 
 #[derive(Serialize)]
@@ -55,11 +65,13 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         mailer,
         from: cfg.smtp_from,
+        api_key: cfg.api_key,
     });
 
     let app = Router::new()
         .route("/healthz", get(healthz))
-        .route("/send-email", post(send_email))
+        .route("/notify", post(notify))
+        .route("/send-notification", post(notify))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.http_bind)
@@ -79,10 +91,21 @@ async fn healthz() -> impl IntoResponse {
     })
 }
 
-async fn send_email(
+async fn notify(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<SendEmailRequest>,
+    headers: HeaderMap,
+    Json(req): Json<NotifyRequest>,
 ) -> impl IntoResponse {
+    if !is_authorized(&headers, &state.api_key) {
+        return error_response(StatusCode::UNAUTHORIZED, "invalid api key");
+    }
+
+    match req.service {
+        NotificationService::Smtp => send_smtp_email(state.as_ref(), req).await,
+    }
+}
+
+async fn send_smtp_email(state: &AppState, req: NotifyRequest) -> (StatusCode, Json<ApiResponse>) {
     if req.title.trim().is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "title cannot be empty");
     }
@@ -113,7 +136,7 @@ async fn send_email(
 
     match state.mailer.send(email).await {
         Ok(_) => {
-            info!(to = %to, "email sent");
+            info!(service = "smtp", to = %to, "notification sent");
             (
                 StatusCode::OK,
                 Json(ApiResponse {
@@ -123,10 +146,27 @@ async fn send_email(
             )
         }
         Err(err) => {
-            error!(to = %to, error = %err, "smtp send failed");
+            error!(service = "smtp", to = %to, error = %err, "send failed");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "smtp send failed")
         }
     }
+}
+
+fn is_authorized(headers: &HeaderMap, expected_api_key: &str) -> bool {
+    match extract_api_key(headers) {
+        Some(provided) => provided == expected_api_key,
+        None => false,
+    }
+}
+
+fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
+    if let Some(value) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        return Some(value);
+    }
+
+    let auth = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    auth.strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))
 }
 
 fn build_mailer(cfg: &Config) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
@@ -161,6 +201,7 @@ impl Config {
 
         Ok(Self {
             http_bind: env::var("HTTP_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
+            api_key: must_env("API_KEY")?,
             smtp_host: must_env("SMTP_HOST")?,
             smtp_port,
             smtp_username: must_env("SMTP_USERNAME")?,
@@ -196,7 +237,7 @@ fn error_response(status: StatusCode, message: &str) -> (StatusCode, Json<ApiRes
 
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "stmp_server=info,axum=info".into());
+        .unwrap_or_else(|_| "notification_server=info,axum=info".into());
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)

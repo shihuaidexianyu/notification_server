@@ -551,6 +551,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "notification_server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "lettre",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -827,19 +840,6 @@ dependencies = [
  "libc",
  "psm",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "stmp_server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "lettre",
- "serde",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
